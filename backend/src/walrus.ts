@@ -1,10 +1,13 @@
-import { SuiGrpcClient } from "@mysten/sui/grpc";
+import { JsonRpcHTTPTransport, SuiJsonRpcClient } from "@mysten/sui/jsonRpc";
 import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
-import { walrus } from "@mysten/walrus";
+import { WalrusClient } from "@mysten/walrus";
 import type { WalletAnalysis } from "./sui.js";
 import { walrusBlobUrl } from "./walrusFetch.js";
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
+const TATUM_SUI_RPC_URL =
+  process.env.TATUM_SUI_RPC_URL ?? "https://sui-mainnet.gateway.tatum.io";
+const TATUM_API_KEY = process.env.TATUM_API_KEY ?? "";
 
 export interface WalrusStorageResult {
   blobId: string;
@@ -48,11 +51,43 @@ export function logWalrusEnvStatus(): void {
     }
   }
 
-  console.log(
-    "[Walrus]   SUI_RPC_URL:",
-    process.env.SUI_RPC_URL ?? "(default: https://fullnode.mainnet.sui.io:443)",
-  );
+  console.log("[Walrus]   TATUM_SUI_RPC_URL:", TATUM_SUI_RPC_URL);
+  console.log("[Walrus]   TATUM_API_KEY defined:", Boolean(TATUM_API_KEY));
+  console.log("[Walrus]   Sui transport: HTTP JSON-RPC");
   console.log("[Walrus]   FRONTEND_ORIGIN:", FRONTEND_ORIGIN);
+}
+
+function createSuiHttpClient(): SuiJsonRpcClient {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (TATUM_API_KEY) {
+    headers["x-api-key"] = TATUM_API_KEY;
+  }
+
+  return new SuiJsonRpcClient({
+    network: "mainnet",
+    transport: new JsonRpcHTTPTransport({
+      url: TATUM_SUI_RPC_URL,
+      rpc: { headers },
+    }),
+  });
+}
+
+function createWalrusClient(): WalrusClient {
+  const suiClient = createSuiHttpClient();
+
+  return new WalrusClient({
+    network: "mainnet",
+    suiClient,
+    uploadRelay: {
+      host: "https://upload-relay.mainnet.walrus.space",
+      sendTip: {
+        max: 50_000_000,
+      },
+    },
+  });
 }
 
 // Requires WALRUS_PRIVATE_KEY in backend/.env — fund that address with SUI + WAL.
@@ -74,29 +109,11 @@ function getStorageKeypair(): Ed25519Keypair {
   }
 }
 
-function createWalrusClient() {
-  const baseUrl = process.env.SUI_RPC_URL ?? "https://fullnode.mainnet.sui.io:443";
-
-  return new SuiGrpcClient({
-    network: "mainnet",
-    baseUrl,
-  }).$extend(
-    walrus({
-      uploadRelay: {
-        host: "https://upload-relay.mainnet.walrus.space",
-        sendTip: {
-          max: 50_000_000,
-        },
-      },
-    }),
-  );
-}
-
 export async function storeAnalysisOnWalrus(
   analysis: WalletAnalysis,
 ): Promise<WalrusStorageResult | null> {
   try {
-    const client = createWalrusClient();
+    const walrusClient = createWalrusClient();
     const keypair = getStorageKeypair();
     const payload = JSON.stringify(
       {
@@ -115,7 +132,7 @@ export async function storeAnalysisOnWalrus(
       `(${blob.byteLength} bytes)`,
     );
 
-    const { blobId } = await client.walrus.writeBlob({
+    const { blobId } = await walrusClient.writeBlob({
       blob,
       deletable: true,
       epochs: 3,
