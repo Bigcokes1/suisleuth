@@ -5,14 +5,43 @@ import type { WalletAnalysis } from "./sui.js";
 import { walrusBlobUrl } from "./walrusFetch.js";
 
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
-const TATUM_SUI_RPC_URL =
-  process.env.TATUM_SUI_RPC_URL ?? "https://sui-mainnet.gateway.tatum.io";
-const TATUM_API_KEY = process.env.TATUM_API_KEY ?? "";
+const WALRUS_SUI_RPC_URL =
+  process.env.SUI_RPC_URL ??
+  process.env.SUI_RPC_FALLBACK_URL ??
+  "https://fullnode.mainnet.sui.io:443";
+const WALRUS_RETRY_DELAYS_MS = [2000, 4000, 8000];
 
 export interface WalrusStorageResult {
   blobId: string;
   shareableUrl: string;
   aggregatorUrl: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRateLimitError(error: unknown): boolean {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    if (
+      message.includes("429") ||
+      message.includes("rate limit") ||
+      message.includes("too many requests")
+    ) {
+      return true;
+    }
+    if (error.cause !== undefined) {
+      return isRateLimitError(error.cause);
+    }
+  }
+
+  const text = String(error).toLowerCase();
+  return (
+    text.includes("429") ||
+    text.includes("rate limit") ||
+    text.includes("too many requests")
+  );
 }
 
 function logWalrusStorageError(error: unknown, walletAddress: string): void {
@@ -51,36 +80,27 @@ export function logWalrusEnvStatus(): void {
     }
   }
 
-  console.log("[Walrus]   TATUM_SUI_RPC_URL:", TATUM_SUI_RPC_URL);
-  console.log("[Walrus]   TATUM_API_KEY defined:", Boolean(TATUM_API_KEY));
-  console.log("[Walrus]   Sui transport: HTTP JSON-RPC");
+  console.log("[Walrus]   SUI RPC (Walrus only):", WALRUS_SUI_RPC_URL);
+  console.log("[Walrus]   Sui transport: HTTP JSON-RPC (public fullnode)");
   console.log("[Walrus]   FRONTEND_ORIGIN:", FRONTEND_ORIGIN);
 }
 
-function createSuiHttpClient(): SuiJsonRpcClient {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-
-  if (TATUM_API_KEY) {
-    headers["x-api-key"] = TATUM_API_KEY;
-  }
-
+function createWalrusSuiClient(): SuiJsonRpcClient {
   return new SuiJsonRpcClient({
     network: "mainnet",
     transport: new JsonRpcHTTPTransport({
-      url: TATUM_SUI_RPC_URL,
-      rpc: { headers },
+      url: WALRUS_SUI_RPC_URL,
+      rpc: {
+        headers: { "Content-Type": "application/json" },
+      },
     }),
   });
 }
 
 function createWalrusClient(): WalrusClient {
-  const suiClient = createSuiHttpClient();
-
   return new WalrusClient({
     network: "mainnet",
-    suiClient,
+    suiClient: createWalrusSuiClient(),
     uploadRelay: {
       host: "https://upload-relay.mainnet.walrus.space",
       sendTip: {
@@ -109,6 +129,41 @@ function getStorageKeypair(): Ed25519Keypair {
   }
 }
 
+async function writeBlobWithRetry(
+  walrusClient: WalrusClient,
+  blob: Uint8Array,
+  signer: Ed25519Keypair,
+): Promise<string> {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= WALRUS_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      const { blobId } = await walrusClient.writeBlob({
+        blob,
+        deletable: true,
+        epochs: 3,
+        signer,
+      });
+      return blobId;
+    } catch (error) {
+      lastError = error;
+      const isLastAttempt = attempt >= WALRUS_RETRY_DELAYS_MS.length;
+
+      if (!isRateLimitError(error) || isLastAttempt) {
+        throw error;
+      }
+
+      const delayMs = WALRUS_RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `[Walrus] HTTP 429 rate limit (attempt ${attempt + 1}/${WALRUS_RETRY_DELAYS_MS.length + 1}), retrying in ${delayMs}ms...`,
+      );
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
+}
+
 export async function storeAnalysisOnWalrus(
   analysis: WalletAnalysis,
 ): Promise<WalrusStorageResult | null> {
@@ -129,15 +184,10 @@ export async function storeAnalysisOnWalrus(
     console.log(
       "[Walrus] Uploading blob for wallet:",
       analysis.address,
-      `(${blob.byteLength} bytes)`,
+      `(${blob.byteLength} bytes) via ${WALRUS_SUI_RPC_URL}`,
     );
 
-    const { blobId } = await walrusClient.writeBlob({
-      blob,
-      deletable: true,
-      epochs: 3,
-      signer: keypair,
-    });
+    const blobId = await writeBlobWithRetry(walrusClient, blob, keypair);
 
     console.log("[Walrus] Upload succeeded, blobId:", blobId);
 

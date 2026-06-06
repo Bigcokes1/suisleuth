@@ -19,14 +19,13 @@ async function main() {
   console.log("Match:", derived === ADDRESS);
 
   const rpcUrl =
-    process.env.TATUM_SUI_RPC_URL ?? "https://sui-mainnet.gateway.tatum.io";
-  const apiKey = process.env.TATUM_API_KEY ?? "";
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (apiKey) headers["x-api-key"] = apiKey;
+    process.env.SUI_RPC_URL ??
+    process.env.SUI_RPC_FALLBACK_URL ??
+    "https://fullnode.mainnet.sui.io:443";
 
   const balancesRes = await fetch(rpcUrl, {
     method: "POST",
-    headers,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -41,7 +40,7 @@ async function main() {
     network: "mainnet",
     transport: new JsonRpcHTTPTransport({
       url: rpcUrl,
-      rpc: { headers },
+      rpc: { headers: { "Content-Type": "application/json" } },
     }),
   });
 
