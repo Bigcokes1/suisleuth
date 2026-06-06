@@ -10,6 +10,15 @@ const WALRUS_SUI_RPC_URL =
   process.env.SUI_RPC_FALLBACK_URL ??
   "https://fullnode.mainnet.sui.io:443";
 const WALRUS_RETRY_DELAYS_MS = [2000, 4000, 8000];
+const WALRUS_PRE_UPLOAD_DELAY_MS = 5000;
+const WALRUS_UPLOAD_TIMEOUT_MS = 30_000;
+
+class WalrusUploadTimeoutError extends Error {
+  constructor() {
+    super(`Walrus upload timed out after ${WALRUS_UPLOAD_TIMEOUT_MS / 1000} seconds`);
+    this.name = "WalrusUploadTimeoutError";
+  }
+}
 
 export interface WalrusStorageResult {
   blobId: string;
@@ -19,6 +28,23 @@ export interface WalrusStorageResult {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withWalrusUploadTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new WalrusUploadTimeoutError()),
+      WALRUS_UPLOAD_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function isRateLimitError(error: unknown): boolean {
@@ -137,6 +163,11 @@ async function writeBlobWithRetry(
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= WALRUS_RETRY_DELAYS_MS.length; attempt += 1) {
+    console.log(
+      `[Walrus] Waiting ${WALRUS_PRE_UPLOAD_DELAY_MS}ms before upload attempt ${attempt + 1}/${WALRUS_RETRY_DELAYS_MS.length + 1}...`,
+    );
+    await sleep(WALRUS_PRE_UPLOAD_DELAY_MS);
+
     try {
       const { blobId } = await walrusClient.writeBlob({
         blob,
@@ -168,36 +199,50 @@ export async function storeAnalysisOnWalrus(
   analysis: WalletAnalysis,
 ): Promise<WalrusStorageResult | null> {
   try {
-    const walrusClient = createWalrusClient();
-    const keypair = getStorageKeypair();
-    const payload = JSON.stringify(
-      {
-        app: "SuiSleuth",
-        version: 1,
-        ...analysis,
-      },
-      null,
-      2,
-    );
-    const blob = new TextEncoder().encode(payload);
-
-    console.log(
-      "[Walrus] Uploading blob for wallet:",
-      analysis.address,
-      `(${blob.byteLength} bytes) via ${WALRUS_SUI_RPC_URL}`,
-    );
-
-    const blobId = await writeBlobWithRetry(walrusClient, blob, keypair);
-
-    console.log("[Walrus] Upload succeeded, blobId:", blobId);
-
-    return {
-      blobId,
-      shareableUrl: `${FRONTEND_ORIGIN}/report/${blobId}`,
-      aggregatorUrl: walrusBlobUrl(blobId),
-    };
+    return await withWalrusUploadTimeout(performWalrusUpload(analysis));
   } catch (error) {
+    if (error instanceof WalrusUploadTimeoutError) {
+      console.warn(
+        "[Walrus] Upload aborted — exceeded 30s timeout for wallet:",
+        analysis.address,
+      );
+      return null;
+    }
+
     logWalrusStorageError(error, analysis.address);
     return null;
   }
+}
+
+async function performWalrusUpload(
+  analysis: WalletAnalysis,
+): Promise<WalrusStorageResult> {
+  const walrusClient = createWalrusClient();
+  const keypair = getStorageKeypair();
+  const payload = JSON.stringify(
+    {
+      app: "SuiSleuth",
+      version: 1,
+      ...analysis,
+    },
+    null,
+    2,
+  );
+  const blob = new TextEncoder().encode(payload);
+
+  console.log(
+    "[Walrus] Uploading blob for wallet:",
+    analysis.address,
+    `(${blob.byteLength} bytes) via ${WALRUS_SUI_RPC_URL}`,
+  );
+
+  const blobId = await writeBlobWithRetry(walrusClient, blob, keypair);
+
+  console.log("[Walrus] Upload succeeded, blobId:", blobId);
+
+  return {
+    blobId,
+    shareableUrl: `${FRONTEND_ORIGIN}/report/${blobId}`,
+    aggregatorUrl: walrusBlobUrl(blobId),
+  };
 }
