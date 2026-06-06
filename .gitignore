@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.cursor/mcp.json
+backend/.env
+frontend/.env
+dist/
+*.tsbuildinfo
