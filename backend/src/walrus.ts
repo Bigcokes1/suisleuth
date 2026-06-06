@@ -12,6 +12,49 @@ export interface WalrusStorageResult {
   aggregatorUrl: string;
 }
 
+function logWalrusStorageError(error: unknown, walletAddress: string): void {
+  console.error("[Walrus] Blob storage failed for wallet:", walletAddress);
+
+  if (error instanceof Error) {
+    console.error("[Walrus] Error message:", error.message);
+    console.error("[Walrus] Stack trace:", error.stack ?? "(no stack trace)");
+    if (error.cause !== undefined) {
+      console.error("[Walrus] Error cause:", error.cause);
+    }
+    return;
+  }
+
+  console.error("[Walrus] Non-Error thrown:", error);
+}
+
+export function logWalrusEnvStatus(): void {
+  const privateKey = process.env.WALRUS_PRIVATE_KEY?.trim();
+  const isDefined = Boolean(privateKey);
+
+  console.log("[Walrus] Startup env check:");
+  console.log("[Walrus]   WALRUS_PRIVATE_KEY defined:", isDefined);
+
+  if (privateKey) {
+    console.log("[Walrus]   WALRUS_PRIVATE_KEY length:", privateKey.length);
+    try {
+      const keypair = Ed25519Keypair.fromSecretKey(privateKey);
+      console.log(
+        "[Walrus]   Storage wallet address:",
+        keypair.getPublicKey().toSuiAddress(),
+      );
+    } catch (error) {
+      console.error("[Walrus]   WALRUS_PRIVATE_KEY is set but invalid");
+      logWalrusStorageError(error, "(startup key validation)");
+    }
+  }
+
+  console.log(
+    "[Walrus]   SUI_RPC_URL:",
+    process.env.SUI_RPC_URL ?? "(default: https://fullnode.mainnet.sui.io:443)",
+  );
+  console.log("[Walrus]   FRONTEND_ORIGIN:", FRONTEND_ORIGIN);
+}
+
 // Requires WALRUS_PRIVATE_KEY in backend/.env — fund that address with SUI + WAL.
 function getStorageKeypair(): Ed25519Keypair {
   const privateKey = process.env.WALRUS_PRIVATE_KEY?.trim();
@@ -66,6 +109,12 @@ export async function storeAnalysisOnWalrus(
     );
     const blob = new TextEncoder().encode(payload);
 
+    console.log(
+      "[Walrus] Uploading blob for wallet:",
+      analysis.address,
+      `(${blob.byteLength} bytes)`,
+    );
+
     const { blobId } = await client.walrus.writeBlob({
       blob,
       deletable: true,
@@ -73,16 +122,15 @@ export async function storeAnalysisOnWalrus(
       signer: keypair,
     });
 
+    console.log("[Walrus] Upload succeeded, blobId:", blobId);
+
     return {
       blobId,
       shareableUrl: `${FRONTEND_ORIGIN}/report/${blobId}`,
       aggregatorUrl: walrusBlobUrl(blobId),
     };
   } catch (error) {
-    console.warn(
-      "Walrus storage failed (analysis still returned):",
-      error instanceof Error ? error.message : error,
-    );
+    logWalrusStorageError(error, analysis.address);
     return null;
   }
 }

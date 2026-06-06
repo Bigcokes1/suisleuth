@@ -7,6 +7,7 @@ import { getRecentLookups } from "./recentLookups.js";
 import { getScanJob, startBackgroundWalrusUpload } from "./scanJobs.js";
 import { analyzeWallet, isValidSuiAddress } from "./sui.js";
 import { fetchWalrusBlob } from "./walrusFetch.js";
+import { logWalrusEnvStatus } from "./walrus.js";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3001);
@@ -141,4 +142,5 @@ app.post("/api/analyze", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`SuiSleuth API listening on http://localhost:${PORT}`);
+  logWalrusEnvStatus();
 });
